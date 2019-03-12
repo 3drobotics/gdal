@@ -299,28 +299,32 @@ class GlobalMercator(object):
                 return max(0, i - 1)    # We don't want to scale up
         return MAXZOOMLEVEL - 1
 
-    def GoogleTile(self, tx, ty, zoom):
-        "Converts TMS tile coordinates to Google Tile coordinates"
+def tms_filename(zoom, tx, ty):
+      return os.path.join(str(zoom), str(tx), str(ty))
+      
+def xyz_filename(zoom, tx, ty):
+      ty = (2**zoom - 1) - ty
+      return os.path.join(str(zoom), str(tx), str(ty))
+      
+def quadtree_filename(zoom, tx, ty):
+      quadKey = ""
+      ty = (2**zoom - 1) - ty
+      for i in range(zoom, 0, -1):
+          digit = 0
+          mask = 1 << (i - 1)
+          if (tx & mask) != 0:
+              digit += 1
+          if (ty & mask) != 0:
+              digit += 2
+          quadKey += str(digit)
 
-        # coordinate origin is moved from bottom-left to top-left corner of the extent
-        return tx, (2**zoom - 1) - ty
-
-    def QuadTree(self, tx, ty, zoom):
-        "Converts TMS tile coordinates to Microsoft QuadTree"
-
-        quadKey = ""
-        ty = (2**zoom - 1) - ty
-        for i in range(zoom, 0, -1):
-            digit = 0
-            mask = 1 << (i - 1)
-            if (tx & mask) != 0:
-                digit += 1
-            if (ty & mask) != 0:
-                digit += 2
-            quadKey += str(digit)
-
-        return quadKey
-
+      return quadKey
+      
+tile_naming_schemes = {
+    "tms": tms_filename,
+    "xyz": xyz_filename,
+    "quadtree": quadtree_filename,
+}
 
 class GlobalGeodetic(object):
     r"""
@@ -896,8 +900,6 @@ def nb_data_bands(dataset):
 def create_base_tile(tile_job_info, tile_detail):
 
     dataBandsCount = tile_job_info.nb_data_bands
-    output = tile_job_info.output_file_path
-    tileext = tile_job_info.tile_extension
     tile_size = tile_job_info.tile_size
     options = tile_job_info.options
 
@@ -928,8 +930,7 @@ def create_base_tile(tile_job_info, tile_detail):
     querysize = tile_detail.querysize
 
     # Tile dataset in memory
-    tilefilename = os.path.join(
-        output, str(tz), str(tx), "%s.%s" % (ty, tileext))
+    tilefilename = tile_job_info.get_tile_filename(tz, tx, ty)
     dstile = mem_drv.Create('', tile_size, tile_size, tilebands)
 
     data = alpha = None
@@ -988,7 +989,7 @@ def create_base_tile(tile_job_info, tile_detail):
 
     # Create a KML file for this tile.
     if tile_job_info.kml:
-        kmlfilename = os.path.join(output, str(tz), str(tx), '%d.kml' % ty)
+        kmlfilename = tile_job_info.get_tile_filename(tz, tx, ty, extension = 'kml')
         if not options.resume or not os.path.exists(kmlfilename):
             with open(kmlfilename, 'wb') as f:
                 f.write(generate_kml(
@@ -1030,10 +1031,7 @@ def create_overview_tiles(tile_job_info, output_folder, options):
             for tx in range(tminx, tmaxx + 1):
 
                 ti += 1
-                tilefilename = os.path.join(output_folder,
-                                            str(tz),
-                                            str(tx),
-                                            "%s.%s" % (ty, tile_job_info.tile_extension))
+                tilefilename = tile_job_info.get_tile_filename(tz, tx, ty)
 
                 if options.verbose:
                     print(ti, '/', tcount, tilefilename)
@@ -1046,8 +1044,7 @@ def create_overview_tiles(tile_job_info, output_folder, options):
                     continue
 
                 # Create directories for the tile
-                if not os.path.exists(os.path.dirname(tilefilename)):
-                    os.makedirs(os.path.dirname(tilefilename))
+                os.makedirs(os.path.dirname(tilefilename), exist_ok = True)
 
                 dsquery = mem_driver.Create('', 2 * tile_job_info.tile_size,
                                             2 * tile_job_info.tile_size, tilebands)
@@ -1065,8 +1062,8 @@ def create_overview_tiles(tile_job_info, output_folder, options):
                     for x in range(2 * tx, 2 * tx + 2):
                         minx, miny, maxx, maxy = tile_job_info.tminmax[tz + 1]
                         if x >= minx and x <= maxx and y >= miny and y <= maxy:
-                            base_tile_path = os.path.join(output_folder, str(tz + 1), str(x),
-                                                          "%s.%s" % (y, tile_job_info.tile_extension))
+                            base_tile_path = tile_job_info.get_tile_filename(tz + 1, x, y)
+                            
                             if not os.path.isfile(base_tile_path):
                                 continue
 
@@ -1107,10 +1104,7 @@ def create_overview_tiles(tile_job_info, output_folder, options):
 
                     # Create a KML file for this tile.
                     if tile_job_info.kml:
-                        with open(os.path.join(
-                            output_folder,
-                            '%d/%d/%d.kml' % (tz, tx, ty)
-                        ), 'wb') as f:
+                        with open(tile_job_info.get_tile_filename(tz, tx, ty, extension='kml'), 'wb') as f:
                             f.write(generate_kml(
                                 tx, ty, tz, tile_job_info.tile_extension, tile_job_info.tile_size,
                                 get_tile_swne(tile_job_info, options), options, children
@@ -1130,6 +1124,9 @@ def optparse_init():
                  type='choice', choices=profile_list,
                  help=("Tile cutting profile (%s) - default 'mercator' "
                        "(Google Maps compatible)" % ",".join(profile_list)))
+    p.add_option("--scheme", dest='scheme',
+                 type='choice', choices=list(tile_naming_schemes.keys()),
+                 help=("Tile naming scheme (%s) - default 'tms' " % ",".join(tile_naming_schemes.keys())))
     p.add_option("-r", "--resampling", dest="resampling",
                  type='choice', choices=resampling_list,
                  help="Resampling method (%s) - default 'average'" % ",".join(resampling_list))
@@ -1186,7 +1183,7 @@ def optparse_init():
                  help="Bing Maps API key from https://www.bingmapsportal.com/")
     p.add_option_group(g)
 
-    p.set_defaults(verbose=False, profile="mercator", kml=False, url='',
+    p.set_defaults(verbose=False, profile="mercator", scheme='tms', kml=False, url='',
                    webviewer='all', copyright='', resampling='average', resume=False,
                    googlekey='INSERT_YOUR_KEY_HERE', bingkey='INSERT_YOUR_KEY_HERE',
                    processes=1)
@@ -1304,6 +1301,7 @@ class TileJobInfo(object):
     tile_extension = ""
     tile_size = 0
     tile_driver = None
+    tile_naming_scheme = 'tms'
     kml = False
     tminmax = []
     tminz = 0
@@ -1328,6 +1326,11 @@ class TileJobInfo(object):
 
     def __repr__(self):
         return "TileJobInfo %s\n" % (self.src_file)
+        
+    def get_tile_filename(self, zoom, tx, ty, extension = None):
+        tile_path_func = tile_naming_schemes[self.tile_naming_scheme]
+        extension = extension or self.tile_extension
+        return os.path.join(self.output_file_path, "%s.%s" % (tile_path_func(zoom, tx, ty), extension))
 
 
 class Gdal2TilesError(Exception):
@@ -1696,21 +1699,21 @@ class GDAL2Tiles(object):
             self.swne = (south, west, north, east)
 
             # Generate googlemaps.html
-            if self.options.webviewer in ('all', 'google') and self.options.profile == 'mercator':
+            if self.options.webviewer in ('all', 'google') and self.options.profile == 'mercator' and self.options.scheme == 'tms':
                 if (not self.options.resume or not
                         os.path.exists(os.path.join(self.output_folder, 'googlemaps.html'))):
                     with open(os.path.join(self.output_folder, 'googlemaps.html'), 'wb') as f:
                         f.write(self.generate_googlemaps().encode('utf-8'))
 
             # Generate openlayers.html
-            if self.options.webviewer in ('all', 'openlayers'):
+            if self.options.webviewer in ('all', 'openlayers') and self.options.scheme == 'tms':
                 if (not self.options.resume or not
                         os.path.exists(os.path.join(self.output_folder, 'openlayers.html'))):
                     with open(os.path.join(self.output_folder, 'openlayers.html'), 'wb') as f:
                         f.write(self.generate_openlayers().encode('utf-8'))
 
             # Generate leaflet.html
-            if self.options.webviewer in ('all', 'leaflet'):
+            if self.options.webviewer in ('all', 'leaflet') and self.options.scheme in ('tms', 'xyz'):
                 if (not self.options.resume or not
                         os.path.exists(os.path.join(self.output_folder, 'leaflet.html'))):
                     with open(os.path.join(self.output_folder, 'leaflet.html'), 'wb') as f:
@@ -1725,7 +1728,7 @@ class GDAL2Tiles(object):
             self.swne = (south, west, north, east)
 
             # Generate openlayers.html
-            if self.options.webviewer in ('all', 'openlayers'):
+            if self.options.webviewer in ('all', 'openlayers') and self.options.scheme == 'tms':
                 if (not self.options.resume or not
                         os.path.exists(os.path.join(self.output_folder, 'openlayers.html'))):
                     with open(os.path.join(self.output_folder, 'openlayers.html'), 'wb') as f:
@@ -1739,14 +1742,14 @@ class GDAL2Tiles(object):
             self.swne = (south, west, north, east)
 
             # Generate openlayers.html
-            if self.options.webviewer in ('all', 'openlayers'):
+            if self.options.webviewer in ('all', 'openlayers') and self.options.scheme == 'tms':
                 if (not self.options.resume or not
                         os.path.exists(os.path.join(self.output_folder, 'openlayers.html'))):
                     with open(os.path.join(self.output_folder, 'openlayers.html'), 'wb') as f:
                         f.write(self.generate_openlayers().encode('utf-8'))
 
         # Generate tilemapresource.xml.
-        if not self.options.resume or not os.path.exists(os.path.join(self.output_folder, 'tilemapresource.xml')):
+        if (not self.options.resume or not os.path.exists(os.path.join(self.output_folder, 'tilemapresource.xml'))) and self.options.scheme == 'tms':
             with open(os.path.join(self.output_folder, 'tilemapresource.xml'), 'wb') as f:
                 f.write(self.generate_tilemapresource().encode('utf-8'))
 
@@ -1782,6 +1785,26 @@ class GDAL2Tiles(object):
             print("----------------------------------------")
             print('')
 
+        conf = TileJobInfo(
+            src_file=self.tmp_vrt_filename,
+            nb_data_bands=self.dataBandsCount,
+            output_file_path=self.output_folder,
+            tile_extension=self.tileext,
+            tile_driver=self.tiledriver,
+            tile_size=self.tile_size,
+            tile_naming_scheme = self.options.scheme,
+            kml=self.kml,
+            tminmax=self.tminmax,
+            tminz=self.tminz,
+            tmaxz=self.tmaxz,
+            in_srs_wkt=self.in_srs_wkt,
+            out_geo_trans=self.out_gt,
+            ominy=self.ominy,
+            is_epsg_4326=self.isepsg4326,
+            options=self.options,
+            exclude_transparent=self.options.exclude_transparent,
+        )
+
         # Set the bounds
         tminx, tminy, tmaxx, tmaxy = self.tminmax[self.tmaxz]
 
@@ -1803,8 +1826,8 @@ class GDAL2Tiles(object):
             for tx in range(tminx, tmaxx + 1):
 
                 ti += 1
-                tilefilename = os.path.join(
-                    self.output_folder, str(tz), str(tx), "%s.%s" % (ty, self.tileext))
+                tilefilename = conf.get_tile_filename(tz, tx, ty)
+
                 if self.options.verbose:
                     print(ti, '/', tcount, tilefilename)
 
@@ -1814,8 +1837,7 @@ class GDAL2Tiles(object):
                     continue
 
                 # Create directories for the tile
-                if not os.path.exists(os.path.dirname(tilefilename)):
-                    os.makedirs(os.path.dirname(tilefilename))
+                os.makedirs(os.path.dirname(tilefilename), exist_ok=True)
 
                 if self.options.profile == 'mercator':
                     # Tile bounds in EPSG:3857
@@ -1876,25 +1898,6 @@ class GDAL2Tiles(object):
                         wy=wy, wxsize=wxsize, wysize=wysize, querysize=querysize,
                     )
                 )
-
-        conf = TileJobInfo(
-            src_file=self.tmp_vrt_filename,
-            nb_data_bands=self.dataBandsCount,
-            output_file_path=self.output_folder,
-            tile_extension=self.tileext,
-            tile_driver=self.tiledriver,
-            tile_size=self.tile_size,
-            kml=self.kml,
-            tminmax=self.tminmax,
-            tminz=self.tminz,
-            tmaxz=self.tmaxz,
-            in_srs_wkt=self.in_srs_wkt,
-            out_geo_trans=self.out_gt,
-            ominy=self.ominy,
-            is_epsg_4326=self.isepsg4326,
-            options=self.options,
-            exclude_transparent=self.options.exclude_transparent,
-        )
 
         return conf, tile_details
 
@@ -2310,6 +2313,7 @@ class GDAL2Tiles(object):
         args['tileformat'] = self.tileext
         args['publishurl'] = self.options.url  # not used
         args['copyright'] = self.options.copyright.replace('"', '\\"')
+        args['tms'] = 'true' if self.options.scheme == 'tms' else 'false'
 
         s = """<!DOCTYPE html>
         <html lang="en">
@@ -2366,7 +2370,7 @@ class GDAL2Tiles(object):
         var white = L.tileLayer("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABmvDolAAAAA1BMVEX///+nxBvIAAAAH0lEQVQYGe3BAQ0AAADCIPunfg43YAAAAAAAAAAA5wIhAAAB9aK9BAAAAABJRU5ErkJggg==", {minZoom: %(minzoom)s, maxZoom: %(maxzoom)s});
 
         // Overlay layers (TMS)
-        var lyr = L.tileLayer('./{z}/{x}/{y}.%(tileformat)s', {tms: true, opacity: 0.7, attribution: "%(copyright)s", minZoom: %(minzoom)s, maxZoom: %(maxzoom)s});
+        var lyr = L.tileLayer('./{z}/{x}/{y}.%(tileformat)s', {tms: %(tms)s, opacity: 0.7, attribution: "%(copyright)s", minZoom: %(minzoom)s, maxZoom: %(maxzoom)s});
 
         // Map
         var map = L.map('map', {

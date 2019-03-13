@@ -49,6 +49,7 @@ import shutil
 import sys
 from uuid import uuid4
 from xml.etree import ElementTree
+import json
 
 from osgeo import gdal
 from osgeo import osr
@@ -998,7 +999,6 @@ def create_base_tile(tile_job_info, tile_detail):
                 ).encode('utf-8'))
 
 
-
 def create_overview_tiles(tile_job_info, output_folder, options):
     """Generation of the overview tiles (higher in the pyramid) based on existing tiles"""
     mem_driver = gdal.GetDriverByName('MEM')
@@ -1752,6 +1752,11 @@ class GDAL2Tiles(object):
         if (not self.options.resume or not os.path.exists(os.path.join(self.output_folder, 'tilemapresource.xml'))) and self.options.scheme == 'tms':
             with open(os.path.join(self.output_folder, 'tilemapresource.xml'), 'wb') as f:
                 f.write(self.generate_tilemapresource().encode('utf-8'))
+        
+        # Generate tiles.json
+        if (not self.options.resume or not os.path.exists(os.path.join(self.output_folder, 'tiles.json'))) and self.options.scheme in ('tms', 'xyz'):
+            with open(os.path.join(self.output_folder, 'tiles.json'), 'wb') as f:
+                f.write(self.generate_tilejson().encode('utf-8'))
 
         if self.kml:
             # TODO: Maybe problem for not automatically generated tminz
@@ -1995,6 +2000,27 @@ class GDAL2Tiles(object):
     </TileMap>
     """
         return s
+        
+    def generate_tilejson(self):
+        """
+        Template for TileJSON
+        https://github.com/mapbox/tilejson-spec/blob/master/2.2.0/README.md
+        """
+        
+        s,w,n,e = self.swne
+
+        return json.dumps({
+          'tilejson': '2.2.0',
+          'name': self.options.title,
+          'attribution': self.options.copyright,
+          'scheme': self.options.scheme,
+          'tiles': [
+            './{z}/{x}/{y}.png'
+          ],
+          'minzoom': self.tminz,
+          'maxzoom': self.tmaxz,
+          'bounds': [w, s, e, n],
+        }, indent = 4)
 
     def generate_googlemaps(self):
         """
